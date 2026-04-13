@@ -1,12 +1,16 @@
 const cv = document.getElementById("c");
 const ctx = cv.getContext("2d");
 const cw = document.getElementById("cw");
+const controls = document.getElementById("controls");
 const bm = document.getElementById("bm");
 const bp = document.getElementById("bp");
 const cdis = document.getElementById("cdis");
 const hint = document.getElementById("hint");
 
 let W = 0, H = 0;
+let VIEW_PAD_X = 24;
+let VIEW_PAD_TOP = 84;
+let VIEW_PAD_BOTTOM = 28;
 
 // Quaternion helpers
 function qMul(a, b) {
@@ -143,10 +147,49 @@ function insetQuad(pts, scale) {
   return pts.map((p) => ({ x: c.x + (p.x - c.x) * scale, y: c.y + (p.y - c.y) * scale }));
 }
 
-function drawQuadPath(pts) {
+function minQuadEdge(pts) {
+  let minEdge = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    minEdge = Math.min(minEdge, Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  return minEdge;
+}
+
+function drawQuadPath(pts, radius = 0) {
+  if (radius <= 0.5) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    return;
+  }
+
   ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  for (let i = 0; i < pts.length; i++) {
+    const prev = pts[(i + pts.length - 1) % pts.length];
+    const cur = pts[i];
+    const next = pts[(i + 1) % pts.length];
+    const prevLen = Math.hypot(prev.x - cur.x, prev.y - cur.y) || 1;
+    const nextLen = Math.hypot(next.x - cur.x, next.y - cur.y) || 1;
+    const cornerRadius = Math.min(radius, prevLen * 0.36, nextLen * 0.36);
+    const start = {
+      x: cur.x + ((prev.x - cur.x) / prevLen) * cornerRadius,
+      y: cur.y + ((prev.y - cur.y) / prevLen) * cornerRadius,
+    };
+    const end = {
+      x: cur.x + ((next.x - cur.x) / nextLen) * cornerRadius,
+      y: cur.y + ((next.y - cur.y) / nextLen) * cornerRadius,
+    };
+
+    if (i === 0) {
+      ctx.moveTo(start.x, start.y);
+    } else {
+      ctx.lineTo(start.x, start.y);
+    }
+    ctx.quadraticCurveTo(cur.x, cur.y, end.x, end.y);
+  }
   ctx.closePath();
 }
 
@@ -185,6 +228,16 @@ const DOTS = {
   6: [[0, 0], [0, 1], [0, 2], [2, 0], [2, 1], [2, 2]],
 };
 
+const DICE_MATERIAL = {
+  hue: 38,
+  saturation: 20,
+  baseLight: 88,
+  bevelLight: 76,
+  pipColor: "#18110d",
+  pipWarm: "#3d2419",
+  stroke: "rgba(82,70,57,0.88)",
+};
+
 // Physics constants
 const GRAVITY = 2350;
 const RESTITUTION = 0.1;
@@ -216,6 +269,7 @@ let gT = 0;
 
 function recalcSceneMetrics() {
   const rect = cw.getBoundingClientRect();
+  const controlsRect = controls.getBoundingClientRect();
   W = Math.max(320, Math.round(rect.width));
   H = Math.max(420, Math.round(rect.height));
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -225,7 +279,14 @@ function recalcSceneMetrics() {
   ctx.imageSmoothingEnabled = true;
   HALF = clamp(Math.round(Math.min(W, H) * 0.052), 20, 30);
   INERTIA = 2 / 3 * MASS * (HALF * 2) * (HALF * 2) / 6;
-  WALL_BOUND = Math.max(HALF * 5, Math.min(W * 0.42, H * 0.52));
+  VIEW_PAD_X = clamp(W * 0.04, 22, 42);
+  VIEW_PAD_TOP = clamp(controlsRect.bottom - rect.top + 20, 78, Math.max(92, H * 0.18));
+  VIEW_PAD_BOTTOM = clamp(H * 0.045, 24, 42);
+  const cornerExtent = Math.sqrt(3) * HALF;
+  const usableU = Math.max(HALF * 9, ((W * 0.5) - VIEW_PAD_X - 2 * cornerExtent * ISO_C) / ISO_C);
+  const usableVFront = Math.max(HALF * 9, (H - VIEW_PAD_BOTTOM - (H * 0.60 + cornerExtent)) / ISO_S);
+  const usableVBack = Math.max(HALF * 9, ((H * 0.60) - VIEW_PAD_TOP - cornerExtent) / ISO_S);
+  WALL_BOUND = Math.max(HALF * 4.6, Math.min(usableU * 0.5, usableVFront * 0.5, usableVBack * 0.5));
   GRID_SPACING = clamp(Math.round(Math.min(W, H) * 0.086), 36, 72);
   GRID_LINES = Math.ceil(WALL_BOUND / GRID_SPACING) + 2;
 }
@@ -285,6 +346,83 @@ class Die {
       }
     }
     return -minZ;
+  }
+
+  getProjectedBounds(mat = qToMat(this.q)) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (let sx = -1; sx <= 1; sx += 2) {
+      for (let sy = -1; sy <= 1; sy += 2) {
+        for (let sz = -1; sz <= 1; sz += 2) {
+          const world = add3(this.pos, matMulV(mat, [sx * HALF, sy * HALF, sz * HALF]));
+          const pt = iso(world[0], world[1], world[2]);
+          if (pt.x < minX) minX = pt.x;
+          if (pt.x > maxX) maxX = pt.x;
+          if (pt.y < minY) minY = pt.y;
+          if (pt.y > maxY) maxY = pt.y;
+        }
+      }
+    }
+    return { minX, maxX, minY, maxY };
+  }
+
+  constrainToViewport(mat = qToMat(this.q)) {
+    let bounds = this.getProjectedBounds(mat);
+    const leftOverflow = VIEW_PAD_X - bounds.minX;
+    if (leftOverflow > 0) {
+      const deltaU = leftOverflow / ISO_C;
+      this.pos[0] += deltaU * 0.5;
+      this.pos[1] -= deltaU * 0.5;
+      const uVel = this.vel[0] - this.vel[1];
+      if (uVel < 0) {
+        this.vel[0] += (-uVel) * 0.38;
+        this.vel[1] -= (-uVel) * 0.38;
+      }
+    }
+
+    bounds = this.getProjectedBounds(mat);
+    const rightOverflow = bounds.maxX - (W - VIEW_PAD_X);
+    if (rightOverflow > 0) {
+      const deltaU = rightOverflow / ISO_C;
+      this.pos[0] -= deltaU * 0.5;
+      this.pos[1] += deltaU * 0.5;
+      const uVel = this.vel[0] - this.vel[1];
+      if (uVel > 0) {
+        this.vel[0] -= uVel * 0.38;
+        this.vel[1] += uVel * 0.38;
+      }
+    }
+
+    bounds = this.getProjectedBounds(mat);
+    const bottomOverflow = bounds.maxY - (H - VIEW_PAD_BOTTOM);
+    if (bottomOverflow > 0) {
+      const deltaV = bottomOverflow / ISO_S;
+      this.pos[0] -= deltaV * 0.5;
+      this.pos[1] -= deltaV * 0.5;
+      const vVel = this.vel[0] + this.vel[1];
+      if (vVel > 0) {
+        this.vel[0] -= vVel * 0.19;
+        this.vel[1] -= vVel * 0.19;
+      }
+    }
+
+    bounds = this.getProjectedBounds(mat);
+    const topOverflow = VIEW_PAD_TOP - bounds.minY;
+    if (topOverflow > 0) {
+      this.pos[2] = Math.max(this.getRestingHeight(mat), this.pos[2] - topOverflow);
+      if (this.vel[2] > 0) this.vel[2] *= -0.28;
+      bounds = this.getProjectedBounds(mat);
+      const stillTopOverflow = VIEW_PAD_TOP - bounds.minY;
+      if (stillTopOverflow > 0) {
+        const deltaV = stillTopOverflow / ISO_S;
+        this.pos[0] += deltaV * 0.5;
+        this.pos[1] += deltaV * 0.5;
+        const vVel = this.vel[0] + this.vel[1];
+        if (vVel < 0) {
+          this.vel[0] += (-vVel) * 0.19;
+          this.vel[1] += (-vVel) * 0.19;
+        }
+      }
+    }
   }
 
   settleNow() {
@@ -413,6 +551,8 @@ class Die {
       this.pos[1] = Math.sign(this.pos[1]) * WALL_BOUND;
     }
 
+    this.constrainToViewport(mat);
+
     const speed = len3(this.vel) + len3(this.omega) * 0.1;
     if (this.pos[2] <= HALF + 1 && speed < SETTLE_SPEED) {
       this.settleTimer += dt;
@@ -432,10 +572,14 @@ class Die {
     const sc = iso(px, py, 0);
     const h = Math.max(0, pz - this.getRestingHeight(mat));
     const ss = Math.max(0.22, 1 - h / 160);
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,0.22)";
+    ctx.shadowBlur = 18 * ss;
     ctx.beginPath();
     ctx.ellipse(sc.x, sc.y, s * 1.0 * ss, s * 0.5 * ss, 0, 0, Math.PI * 2);
     ctx.fillStyle = `rgba(0,0,0,${0.48 - ss * 0.12})`;
     ctx.fill();
+    ctx.restore();
     ctx.globalAlpha = this.alpha;
 
     const faces = FACE_DEFS.map((face) => {
@@ -455,9 +599,14 @@ class Die {
 
     ctx.lineJoin = "round";
     faces.forEach((face) => {
-      const tone = Math.round(78 * face.light + 12);
-      const inner = insetQuad(face.pts, 0.86);
-      const highlight = insetQuad(face.pts, 0.93);
+      const edgeSize = minQuadEdge(face.pts);
+      const outerRadius = clamp(edgeSize * 0.12, 2.8, 8.5);
+      const inner = insetQuad(face.pts, 0.84);
+      const innerRadius = outerRadius * 0.75;
+      const highlight = insetQuad(face.pts, 0.92);
+      const faceTone = clamp(DICE_MATERIAL.baseLight + face.light * 7, 86, 97);
+      const bevelTone = clamp(DICE_MATERIAL.bevelLight + face.light * 6, 72, 88);
+      const saturation = clamp(DICE_MATERIAL.saturation + face.light * 5, 16, 28);
       const bounds = face.pts.reduce((acc, p) => ({
         minX: Math.min(acc.minX, p.x),
         maxX: Math.max(acc.maxX, p.x),
@@ -465,27 +614,48 @@ class Die {
         maxY: Math.max(acc.maxY, p.y),
       }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
 
-      drawQuadPath(face.pts);
-      ctx.fillStyle = `hsl(38 23% ${tone}%)`;
+      drawQuadPath(face.pts, outerRadius);
+      ctx.fillStyle = `hsl(${DICE_MATERIAL.hue} ${saturation}% ${bevelTone}%)`;
       ctx.fill();
-      ctx.strokeStyle = "rgba(88,73,58,0.85)";
-      ctx.lineWidth = 1.15;
+      ctx.strokeStyle = DICE_MATERIAL.stroke;
+      ctx.lineWidth = 1.2;
       ctx.stroke();
 
       ctx.save();
-      drawQuadPath(face.pts);
+      drawQuadPath(inner, innerRadius);
       ctx.clip();
-      const sheen = ctx.createLinearGradient(face.pts[0].x, face.pts[0].y, face.pts[2].x, face.pts[2].y);
-      sheen.addColorStop(0, "rgba(255,255,255,0.20)");
-      sheen.addColorStop(0.42, "rgba(255,255,255,0.05)");
-      sheen.addColorStop(1, "rgba(0,0,0,0.16)");
-      ctx.fillStyle = sheen;
+      const material = ctx.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
+      material.addColorStop(0, `hsl(${DICE_MATERIAL.hue} ${saturation + 4}% ${Math.min(98, faceTone + 4)}%)`);
+      material.addColorStop(0.42, `hsl(${DICE_MATERIAL.hue} ${saturation}% ${faceTone}%)`);
+      material.addColorStop(1, `hsl(${DICE_MATERIAL.hue - 2} ${saturation + 3}% ${Math.max(72, faceTone - 13)}%)`);
+      ctx.fillStyle = material;
+      ctx.fillRect(bounds.minX - 4, bounds.minY - 4, bounds.maxX - bounds.minX + 8, bounds.maxY - bounds.minY + 8);
+
+      const bloom = ctx.createRadialGradient(
+        bounds.minX + (bounds.maxX - bounds.minX) * 0.34,
+        bounds.minY + (bounds.maxY - bounds.minY) * 0.28,
+        0,
+        bounds.minX + (bounds.maxX - bounds.minX) * 0.38,
+        bounds.minY + (bounds.maxY - bounds.minY) * 0.32,
+        Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) * 0.95
+      );
+      bloom.addColorStop(0, "rgba(255,255,255,0.24)");
+      bloom.addColorStop(0.38, "rgba(255,255,255,0.10)");
+      bloom.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = bloom;
+      ctx.fillRect(bounds.minX - 4, bounds.minY - 4, bounds.maxX - bounds.minX + 8, bounds.maxY - bounds.minY + 8);
+
+      const edgeShade = ctx.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
+      edgeShade.addColorStop(0, "rgba(255,255,255,0.06)");
+      edgeShade.addColorStop(0.52, "rgba(255,255,255,0)");
+      edgeShade.addColorStop(1, "rgba(69,48,37,0.18)");
+      ctx.fillStyle = edgeShade;
       ctx.fillRect(bounds.minX - 4, bounds.minY - 4, bounds.maxX - bounds.minX + 8, bounds.maxY - bounds.minY + 8);
       ctx.restore();
 
-      drawQuadPath(inner);
-      ctx.strokeStyle = "rgba(255,248,235,0.16)";
-      ctx.lineWidth = 0.9;
+      drawQuadPath(inner, innerRadius);
+      ctx.strokeStyle = "rgba(255,247,235,0.18)";
+      ctx.lineWidth = 0.95;
       ctx.stroke();
 
       ctx.beginPath();
@@ -493,26 +663,48 @@ class Die {
       ctx.lineTo(highlight[1].x, highlight[1].y);
       ctx.moveTo(highlight[0].x, highlight[0].y);
       ctx.lineTo(highlight[3].x, highlight[3].y);
-      ctx.strokeStyle = "rgba(255,255,255,0.22)";
-      ctx.lineWidth = 1.1;
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.lineWidth = 1.15;
       ctx.stroke();
 
       const dl = DOTS[face.value];
       if (!dl) return;
-      const pipRadius = clamp(Math.hypot(face.pts[1].x - face.pts[0].x, face.pts[1].y - face.pts[0].y) * 0.085, 2.6, 4.1);
+      const pipRadius = clamp(edgeSize * 0.094, 2.8, 5.4);
       dl.forEach(([row, col]) => {
-        const pt = quadPoint(face.pts, (col + 0.5) / 3, (row + 0.5) / 3);
+        const pt = quadPoint(inner, (col + 0.5) / 3, (row + 0.5) / 3);
         ctx.beginPath();
-        ctx.arc(pt.x + pipRadius * 0.18, pt.y + pipRadius * 0.22, pipRadius * 1.03, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(0,0,0,0.18)";
+        ctx.arc(pt.x, pt.y, pipRadius * 1.18, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(61,38,30,0.10)";
         ctx.fill();
+        ctx.beginPath();
+        ctx.arc(pt.x + pipRadius * 0.16, pt.y + pipRadius * 0.2, pipRadius * 1.04, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(0,0,0,0.16)";
+        ctx.fill();
+
+        const cavity = ctx.createRadialGradient(
+          pt.x - pipRadius * 0.3,
+          pt.y - pipRadius * 0.34,
+          pipRadius * 0.18,
+          pt.x,
+          pt.y,
+          pipRadius
+        );
+        cavity.addColorStop(0, "rgba(111,67,48,0.42)");
+        cavity.addColorStop(0.34, DICE_MATERIAL.pipWarm);
+        cavity.addColorStop(1, DICE_MATERIAL.pipColor);
         ctx.beginPath();
         ctx.arc(pt.x, pt.y, pipRadius, 0, Math.PI * 2);
-        ctx.fillStyle = "#161411";
+        ctx.fillStyle = cavity;
         ctx.fill();
+
         ctx.beginPath();
-        ctx.arc(pt.x - pipRadius * 0.22, pt.y - pipRadius * 0.2, pipRadius * 0.38, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        ctx.arc(pt.x, pt.y, pipRadius * 0.66, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(0,0,0,0.10)";
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(pt.x - pipRadius * 0.24, pt.y - pipRadius * 0.22, pipRadius * 0.34, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.14)";
         ctx.fill();
       });
     });
