@@ -205,6 +205,7 @@ let lastTs = null;
 let gT = 0;
 const MODEL_METRICS = {
   size: new THREE.Vector3(1, 1, 1),
+  halfExtents: new THREE.Vector3(0.5, 0.5, 0.5),
   halfHeight: 0.5,
   maxRadiusXY: Math.sqrt(0.5),
 };
@@ -239,6 +240,7 @@ function updateTemplateMetrics(object) {
   const size = new THREE.Vector3();
   box.getSize(size);
   MODEL_METRICS.size.copy(size);
+  MODEL_METRICS.halfExtents.copy(size).multiplyScalar(0.5);
   MODEL_METRICS.halfHeight = Math.max(0.5, size.z * 0.5);
   MODEL_METRICS.maxRadiusXY = Math.max(Math.hypot(size.x, size.y) * 0.5, 0.5);
 }
@@ -298,7 +300,7 @@ async function loadDiceTemplate() {
 }
 
 function getDieFootprint() {
-  return Math.max(HALF * 1.14, HALF * 1.98 * MODEL_METRICS.maxRadiusXY);
+  return Math.max(HALF * 1.14, HALF * 1.98 * MODEL_METRICS.maxRadiusXY * 1.04);
 }
 
 function clampPointToBounds(point, margin = getDieFootprint()) {
@@ -562,11 +564,16 @@ class Die {
     let maxX = -Infinity;
     let minY = Infinity;
     let maxY = -Infinity;
+    const profile = getViewportProfile();
+    const visualScale = HALF * 1.98 * (profile.isPhone ? 1.06 : 1.02);
+    const hx = MODEL_METRICS.halfExtents.x * visualScale;
+    const hy = MODEL_METRICS.halfExtents.y * visualScale;
+    const hz = MODEL_METRICS.halfExtents.z * visualScale;
 
     for (let sx = -1; sx <= 1; sx += 2) {
       for (let sy = -1; sy <= 1; sy += 2) {
         for (let sz = -1; sz <= 1; sz += 2) {
-          const world = add3(this.pos, matMulV(mat, [sx * HALF, sy * HALF, sz * HALF]));
+          const world = add3(this.pos, matMulV(mat, [sx * hx, sy * hy, sz * hz]));
           const screen = worldToScreen(world[0], world[1], world[2]);
           minX = Math.min(minX, screen.x);
           maxX = Math.max(maxX, screen.x);
@@ -580,29 +587,46 @@ class Die {
   }
 
   constrainToViewport(mat = qToMat(this.q)) {
-    const bounds = this.getProjectedBounds(mat);
-    let dxScreen = 0;
-    let dyScreen = 0;
+    for (let i = 0; i < 3; i++) {
+      const bounds = this.getProjectedBounds(mat);
+      const availableWidth = W - VIEW_PAD_X * 2;
+      const availableHeight = H - VIEW_PAD_TOP - VIEW_PAD_BOTTOM;
+      const boundsWidth = bounds.maxX - bounds.minX;
+      const boundsHeight = bounds.maxY - bounds.minY;
+      let dxScreen = 0;
+      let dyScreen = 0;
 
-    if (bounds.minX < VIEW_PAD_X) dxScreen += VIEW_PAD_X - bounds.minX;
-    if (bounds.maxX > W - VIEW_PAD_X) dxScreen += (W - VIEW_PAD_X) - bounds.maxX;
-    if (bounds.minY < VIEW_PAD_TOP) dyScreen += VIEW_PAD_TOP - bounds.minY;
-    if (bounds.maxY > H - VIEW_PAD_BOTTOM) dyScreen += (H - VIEW_PAD_BOTTOM) - bounds.maxY;
+      if (boundsWidth >= availableWidth) {
+        dxScreen = W * 0.5 - (bounds.minX + bounds.maxX) * 0.5;
+      } else if (bounds.minX < VIEW_PAD_X) {
+        dxScreen = VIEW_PAD_X - bounds.minX;
+      } else if (bounds.maxX > W - VIEW_PAD_X) {
+        dxScreen = (W - VIEW_PAD_X) - bounds.maxX;
+      }
 
-    if (dxScreen === 0 && dyScreen === 0) return;
+      if (boundsHeight >= availableHeight) {
+        dyScreen = (VIEW_PAD_TOP + availableHeight * 0.5) - (bounds.minY + bounds.maxY) * 0.5;
+      } else if (bounds.minY < VIEW_PAD_TOP) {
+        dyScreen = VIEW_PAD_TOP - bounds.minY;
+      } else if (bounds.maxY > H - VIEW_PAD_BOTTOM) {
+        dyScreen = (H - VIEW_PAD_BOTTOM) - bounds.maxY;
+      }
 
-    const [dxWorld, dyWorld] = screenDeltaToGroundDelta(dxScreen, dyScreen);
-    this.pos[0] += dxWorld;
-    this.pos[1] += dyWorld;
+      if (Math.abs(dxScreen) < 0.01 && Math.abs(dyScreen) < 0.01) break;
 
-    const projectedMove = [dxWorld, dyWorld, 0];
-    const moveLen = len3(projectedMove);
-    if (moveLen > 0.001) {
-      const moveDir = scale3(projectedMove, 1 / moveLen);
-      const outwardSpeed = this.vel[0] * moveDir[0] + this.vel[1] * moveDir[1];
-      if (outwardSpeed < 0) {
-        this.vel[0] -= moveDir[0] * outwardSpeed * 0.72;
-        this.vel[1] -= moveDir[1] * outwardSpeed * 0.72;
+      const [dxWorld, dyWorld] = screenDeltaToGroundDelta(dxScreen, dyScreen);
+      this.pos[0] += dxWorld;
+      this.pos[1] += dyWorld;
+
+      const projectedMove = [dxWorld, dyWorld, 0];
+      const moveLen = len3(projectedMove);
+      if (moveLen > 0.001) {
+        const moveDir = scale3(projectedMove, 1 / moveLen);
+        const outwardSpeed = this.vel[0] * moveDir[0] + this.vel[1] * moveDir[1];
+        if (outwardSpeed < 0) {
+          this.vel[0] -= moveDir[0] * outwardSpeed * 0.72;
+          this.vel[1] -= moveDir[1] * outwardSpeed * 0.72;
+        }
       }
     }
   }
