@@ -170,19 +170,23 @@ const FACE_NORMALS = [
 
 // Physics constants
 const GRAVITY = 2350;
-const RESTITUTION = 0.1;
+const RESTITUTION = 0.06;
 const MU_ROLL = 0.9;
 const MU_SPIN = 0.36;
 const FLOOR_Z = 0;
 const MASS = 1;
-const MICRO_BOUNCE_SPEED = 16;
-const SETTLE_SPEED = 6;
+const MICRO_BOUNCE_SPEED = 24;
+const SETTLE_SPEED = 4.8;
 const SETTLE_TIME = 0.18;
 const FORCE_SETTLE_TIME = 2;
 const STABLE_SLIDE_SPEED = 34;
 const STABLE_ANG_SPEED = 12;
 const TILT_RECOVERY_FORCE = 22;
 const TILT_RECOVERY_DOT = 0.58;
+const FLOOR_SNAP_GAP = 2.4;
+const FLOOR_SNAP_VERTICAL_SPEED = 28;
+const FLOOR_SNAP_LINEAR_SPEED = 10;
+const FLOOR_SNAP_ANG_SPEED = 7.5;
 
 let HALF = 22;
 let INERTIA = (2 / 3) * MASS * (HALF * 2) * (HALF * 2) / 6;
@@ -596,6 +600,7 @@ class Die {
       const r = sub3(cp, this.pos);
       const vRel = scale3(contactVelSum, 1 / contactCount);
       const vNorm = vRel[2];
+      const restingHeight = this.getRestingHeight(mat);
 
       if (vNorm < -MICRO_BOUNCE_SPEED) {
         const rCrossN = [r[1], -r[0], 0];
@@ -628,7 +633,7 @@ class Die {
       this.omega[0] *= groundAngular;
       this.omega[1] *= groundAngular;
       this.omega[2] *= groundAngular;
-      if (Math.abs(this.vel[2]) < MICRO_BOUNCE_SPEED) this.vel[2] = 0;
+      if (Math.abs(this.vel[2]) < MICRO_BOUNCE_SPEED * 1.18) this.vel[2] = 0;
 
       const upInfo = this.getUpFaceInfo(mat);
       const angSpeed = len3(this.omega);
@@ -653,6 +658,31 @@ class Die {
       this.vel[1] *= extraLinearDrag;
       this.omega[0] *= extraAngularDrag;
       this.omega[1] *= extraAngularDrag;
+
+      const restingGap = this.pos[2] - restingHeight;
+      if (
+        restingGap < FLOOR_SNAP_GAP &&
+        Math.abs(vNorm) < FLOOR_SNAP_VERTICAL_SPEED &&
+        vtLen < FLOOR_SNAP_LINEAR_SPEED &&
+        angSpeed < FLOOR_SNAP_ANG_SPEED &&
+        upInfo.dot > 0.72
+      ) {
+        const snapMix = clamp(dt * 18, 0, 1);
+        this.pos[2] = THREE.MathUtils.lerp(this.pos[2], restingHeight, snapMix);
+        this.vel[2] = 0;
+        this.vel[0] *= Math.pow(0.84, dt * 60);
+        this.vel[1] *= Math.pow(0.84, dt * 60);
+        this.omega[0] *= Math.pow(0.72, dt * 60);
+        this.omega[1] *= Math.pow(0.72, dt * 60);
+        this.omega[2] *= Math.pow(0.68, dt * 60);
+
+        if (Math.abs(this.pos[2] - restingHeight) < 0.18) this.pos[2] = restingHeight;
+        if (vtLen < 2.4) {
+          this.vel[0] = 0;
+          this.vel[1] = 0;
+        }
+        if (angSpeed < 1.5) this.omega = [0, 0, 0];
+      }
     }
 
     this.vel[0] *= Math.pow(0.994, dt * 60);
@@ -663,8 +693,9 @@ class Die {
 
     this.constrainToBounds();
 
+    const restingHeight = this.getRestingHeight();
     const speed = len3(this.vel) + len3(this.omega) * 0.1;
-    if (this.pos[2] <= HALF + 1 && speed < SETTLE_SPEED) {
+    if (this.pos[2] <= restingHeight + 1 && speed < SETTLE_SPEED) {
       this.settleTimer += dt;
       if (this.settleTimer > SETTLE_TIME) this.settleNow();
     } else {
