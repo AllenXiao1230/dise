@@ -303,6 +303,15 @@ function getDieFootprint() {
   return Math.max(HALF * 1.14, HALF * 1.98 * MODEL_METRICS.maxRadiusXY * 1.04);
 }
 
+function getModelHalfExtents() {
+  const visualScale = HALF * 1.98;
+  return [
+    MODEL_METRICS.halfExtents.x * visualScale,
+    MODEL_METRICS.halfExtents.y * visualScale,
+    MODEL_METRICS.halfExtents.z * visualScale,
+  ];
+}
+
 function clampPointToBounds(point, margin = getDieFootprint()) {
   return [
     clamp(point[0], WORLD_BOUNDS.minX + margin, WORLD_BOUNDS.maxX - margin),
@@ -547,11 +556,12 @@ class Die {
   }
 
   getRestingHeight(mat = qToMat(this.q)) {
+    const [hx, hy, hz] = getModelHalfExtents();
     let minZ = Infinity;
     for (let sx = -1; sx <= 1; sx += 2) {
       for (let sy = -1; sy <= 1; sy += 2) {
         for (let sz = -1; sz <= 1; sz += 2) {
-          const cornerZ = matMulV(mat, [sx * HALF, sy * HALF, sz * HALF])[2];
+          const cornerZ = matMulV(mat, [sx * hx, sy * hy, sz * hz])[2];
           if (cornerZ < minZ) minZ = cornerZ;
         }
       }
@@ -565,10 +575,11 @@ class Die {
     let minY = Infinity;
     let maxY = -Infinity;
     const profile = getViewportProfile();
-    const visualScale = HALF * 1.98 * (profile.isPhone ? 1.06 : 1.02);
-    const hx = MODEL_METRICS.halfExtents.x * visualScale;
-    const hy = MODEL_METRICS.halfExtents.y * visualScale;
-    const hz = MODEL_METRICS.halfExtents.z * visualScale;
+    const [baseHx, baseHy, baseHz] = getModelHalfExtents();
+    const screenSafety = profile.isPhone ? 1.06 : 1.02;
+    const hx = baseHx * screenSafety;
+    const hy = baseHy * screenSafety;
+    const hz = baseHz * screenSafety;
 
     for (let sx = -1; sx <= 1; sx += 2) {
       for (let sy = -1; sy <= 1; sy += 2) {
@@ -684,11 +695,12 @@ class Die {
     let contactCount = 0;
     let contactVelSum = [0, 0, 0];
     let contactPtSum = [0, 0, 0];
+    const [hx, hy, hz] = getModelHalfExtents();
 
     for (let sx = -1; sx <= 1; sx += 2) {
       for (let sy = -1; sy <= 1; sy += 2) {
         for (let sz = -1; sz <= 1; sz += 2) {
-          const local = [sx * HALF, sy * HALF, sz * HALF];
+          const local = [sx * hx, sy * hy, sz * hz];
           const world = add3(this.pos, matMulV(mat, local));
           if (world[2] < FLOOR_Z) {
             const depth = FLOOR_Z - world[2];
