@@ -180,6 +180,11 @@ let raf = null;
 let dice = [];
 let lastTs = null;
 let gT = 0;
+const MODEL_METRICS = {
+  size: new THREE.Vector3(1, 1, 1),
+  halfHeight: 0.5,
+  maxRadiusXY: Math.sqrt(0.5),
+};
 let diceTemplate = createFallbackDiceTemplate();
 
 const WORLD_BOUNDS = {
@@ -203,6 +208,16 @@ function createFallbackDiceTemplate() {
   body.receiveShadow = true;
   root.add(body);
   return root;
+}
+
+function updateTemplateMetrics(object) {
+  object.updateWorldMatrix(true, true);
+  const box = new THREE.Box3().setFromObject(object);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  MODEL_METRICS.size.copy(size);
+  MODEL_METRICS.halfHeight = Math.max(0.5, size.z * 0.5);
+  MODEL_METRICS.maxRadiusXY = Math.max(Math.hypot(size.x, size.y) * 0.5, 0.5);
 }
 
 function setModelShadowFlags(object) {
@@ -236,6 +251,7 @@ function normalizeDiceTemplate(source) {
   // glTF assets are commonly authored Y-up; rotate once into this scene's Z-up world.
   wrapper.rotation.x = Math.PI / 2;
   wrapper.add(content);
+  updateTemplateMetrics(wrapper);
   return wrapper;
 }
 
@@ -249,12 +265,24 @@ async function loadDiceTemplate() {
   try {
     const gltf = await loader.loadAsync(DICE_MODEL_URL);
     diceTemplate = normalizeDiceTemplate(gltf.scene);
+    recalcSceneMetrics();
     dice.forEach((die) => die.refreshVisual());
     if (!rolling) hint.textContent = "點擊擲骰";
   } catch (error) {
     console.warn(`Failed to load ${DICE_MODEL_URL}. Falling back to a simple cube.`, error);
     if (!rolling) hint.textContent = "未找到 models/dice.glb，暫用方塊";
   }
+}
+
+function getDieFootprint() {
+  return Math.max(HALF * 1.14, HALF * 1.98 * MODEL_METRICS.maxRadiusXY);
+}
+
+function clampPointToBounds(point, margin = getDieFootprint()) {
+  return [
+    clamp(point[0], WORLD_BOUNDS.minX + margin, WORLD_BOUNDS.maxX - margin),
+    clamp(point[1], WORLD_BOUNDS.minY + margin, WORLD_BOUNDS.maxY - margin),
+  ];
 }
 
 function screenToFloor(sx, sy) {
@@ -297,7 +325,7 @@ function updateWorldBounds() {
     [W - VIEW_PAD_X, H - VIEW_PAD_BOTTOM],
   ].map(([sx, sy]) => screenToFloor(sx, sy));
 
-  const margin = HALF * 1.4;
+  const margin = getDieFootprint() * 1.08;
   let minX = Math.min(...samples.map((point) => point[0])) + margin;
   let maxX = Math.max(...samples.map((point) => point[0])) - margin;
   let minY = Math.min(...samples.map((point) => point[1])) + margin;
@@ -376,8 +404,8 @@ class Die {
   constructor(delay, spawnPos, launchVel) {
     this.delay = delay;
     this.pos = [
-      clamp(spawnPos[0] + (Math.random() - 0.5) * HALF * 0.24, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
-      clamp(spawnPos[1] + (Math.random() - 0.5) * HALF * 0.24, WORLD_BOUNDS.minY, WORLD_BOUNDS.maxY),
+      clamp(spawnPos[0] + (Math.random() - 0.5) * HALF * 0.08, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+      clamp(spawnPos[1] + (Math.random() - 0.5) * HALF * 0.08, WORLD_BOUNDS.minY, WORLD_BOUNDS.maxY),
       HALF + 20 + Math.random() * 12,
     ];
     this.vel = [
@@ -695,17 +723,11 @@ function rollDice(event) {
 
   const pointer = event ? getPointerPos(event) : { x: W / 2, y: H * 0.34 };
   const floorPoint = screenToFloor(pointer.x, pointer.y);
-  const margin = HALF * 1.2;
-  const spawnBase = [
-    clamp(floorPoint[0], WORLD_BOUNDS.minX + margin, WORLD_BOUNDS.maxX - margin),
-    clamp(floorPoint[1], WORLD_BOUNDS.minY + margin, WORLD_BOUNDS.maxY - margin),
-  ];
+  const margin = getDieFootprint() * 1.04;
+  const spawnBase = clampPointToBounds(floorPoint, margin);
 
   const aimPoint = screenToFloor(W * 0.5, H * 0.68);
-  const target = [
-    clamp(aimPoint[0], WORLD_BOUNDS.minX + margin, WORLD_BOUNDS.maxX - margin),
-    clamp(aimPoint[1], WORLD_BOUNDS.minY + margin, WORLD_BOUNDS.maxY - margin),
-  ];
+  const target = clampPointToBounds(aimPoint, margin);
 
   let throwDir = [target[0] - spawnBase[0], target[1] - spawnBase[1], 0];
   if (len3(throwDir) < 18) throwDir = [0, 1, 0];
@@ -728,7 +750,7 @@ function rollDice(event) {
     let launchVel;
 
     if (diceCount === 1) {
-      spawnPos = add3(spawnBase, scale3(sideDir, 0));
+      spawnPos = clampPointToBounds(spawnBase, margin);
       const forwardSpeed = baseSpeed + (Math.random() - 0.5) * 26;
       const sideSpeed = (Math.random() - 0.5) * 14;
       launchVel = [
@@ -742,10 +764,10 @@ function rollDice(event) {
       const tangentDir = [-radialDir[1], radialDir[0], 0];
       const spawnRadius = HALF * (1.9 + 0.16 * diceCount);
       const spawnJitter = HALF * 0.38;
-      spawnPos = add3(
+      spawnPos = clampPointToBounds(add3(
         add3(spawnBase, scale3(radialDir, spawnRadius)),
         scale3(tangentDir, (Math.random() - 0.5) * spawnJitter)
-      );
+      ), margin);
       const outwardSpeed = baseSpeed + 62 + (Math.random() - 0.5) * 36;
       const swirlSpeed = (Math.random() - 0.5) * 24;
       launchVel = [
@@ -784,6 +806,7 @@ window.addEventListener("resize", () => {
 });
 
 bm.disabled = true;
+updateTemplateMetrics(diceTemplate);
 recalcSceneMetrics();
 renderScene();
 loadDiceTemplate();
