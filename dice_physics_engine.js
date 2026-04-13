@@ -70,6 +70,13 @@ const raycaster = new THREE.Raycaster();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 const ndc = new THREE.Vector2();
 const CAMERA_DIR = new THREE.Vector3(1.12, -1.18, 0.92).normalize();
+const SCREEN_BASIS = {
+  a: 1,
+  b: 0,
+  c: 0,
+  d: 1,
+  det: 1,
+};
 
 let W = 0;
 let H = 0;
@@ -301,6 +308,32 @@ function clampPointToBounds(point, margin = getDieFootprint()) {
   ];
 }
 
+function worldToScreen(x, y, z) {
+  const projected = new THREE.Vector3(x, y, z).project(camera);
+  return {
+    x: (projected.x * 0.5 + 0.5) * W,
+    y: (-projected.y * 0.5 + 0.5) * H,
+  };
+}
+
+function updateScreenBasis() {
+  const origin = worldToScreen(0, 0, 0);
+  const unitX = worldToScreen(1, 0, 0);
+  const unitY = worldToScreen(0, 1, 0);
+  SCREEN_BASIS.a = unitX.x - origin.x;
+  SCREEN_BASIS.b = unitY.x - origin.x;
+  SCREEN_BASIS.c = unitX.y - origin.y;
+  SCREEN_BASIS.d = unitY.y - origin.y;
+  SCREEN_BASIS.det = SCREEN_BASIS.a * SCREEN_BASIS.d - SCREEN_BASIS.b * SCREEN_BASIS.c || 1;
+}
+
+function screenDeltaToGroundDelta(dx, dy) {
+  return [
+    (dx * SCREEN_BASIS.d - SCREEN_BASIS.b * dy) / SCREEN_BASIS.det,
+    (SCREEN_BASIS.a * dy - dx * SCREEN_BASIS.c) / SCREEN_BASIS.det,
+  ];
+}
+
 function getResponsiveDieHalf() {
   const { shortSide, longSide, isPhone, isDesktop } = getViewportProfile();
   const areaScale = Math.sqrt((W * H) / (390 * 844));
@@ -325,7 +358,9 @@ function clampExistingDiceToBounds() {
     const clamped = clampPointToBounds(die.pos, margin);
     die.pos[0] = clamped[0];
     die.pos[1] = clamped[1];
-    die.pos[2] = Math.max(die.pos[2], die.getRestingHeight());
+    const mat = qToMat(die.q);
+    die.pos[2] = Math.max(die.pos[2], die.getRestingHeight(mat));
+    die.constrainToViewport(mat);
     die.syncVisual();
   });
 }
@@ -356,6 +391,7 @@ function updateCamera() {
   camera.position.copy(CAMERA_DIR).multiplyScalar(viewHeight * 2.2).add(focus);
   camera.lookAt(focus);
   camera.updateProjectionMatrix();
+  updateScreenBasis();
 }
 
 function updateWorldBounds() {
@@ -519,6 +555,56 @@ class Die {
       }
     }
     return -minZ;
+  }
+
+  getProjectedBounds(mat = qToMat(this.q)) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    for (let sx = -1; sx <= 1; sx += 2) {
+      for (let sy = -1; sy <= 1; sy += 2) {
+        for (let sz = -1; sz <= 1; sz += 2) {
+          const world = add3(this.pos, matMulV(mat, [sx * HALF, sy * HALF, sz * HALF]));
+          const screen = worldToScreen(world[0], world[1], world[2]);
+          minX = Math.min(minX, screen.x);
+          maxX = Math.max(maxX, screen.x);
+          minY = Math.min(minY, screen.y);
+          maxY = Math.max(maxY, screen.y);
+        }
+      }
+    }
+
+    return { minX, maxX, minY, maxY };
+  }
+
+  constrainToViewport(mat = qToMat(this.q)) {
+    const bounds = this.getProjectedBounds(mat);
+    let dxScreen = 0;
+    let dyScreen = 0;
+
+    if (bounds.minX < VIEW_PAD_X) dxScreen += VIEW_PAD_X - bounds.minX;
+    if (bounds.maxX > W - VIEW_PAD_X) dxScreen += (W - VIEW_PAD_X) - bounds.maxX;
+    if (bounds.minY < VIEW_PAD_TOP) dyScreen += VIEW_PAD_TOP - bounds.minY;
+    if (bounds.maxY > H - VIEW_PAD_BOTTOM) dyScreen += (H - VIEW_PAD_BOTTOM) - bounds.maxY;
+
+    if (dxScreen === 0 && dyScreen === 0) return;
+
+    const [dxWorld, dyWorld] = screenDeltaToGroundDelta(dxScreen, dyScreen);
+    this.pos[0] += dxWorld;
+    this.pos[1] += dyWorld;
+
+    const projectedMove = [dxWorld, dyWorld, 0];
+    const moveLen = len3(projectedMove);
+    if (moveLen > 0.001) {
+      const moveDir = scale3(projectedMove, 1 / moveLen);
+      const outwardSpeed = this.vel[0] * moveDir[0] + this.vel[1] * moveDir[1];
+      if (outwardSpeed < 0) {
+        this.vel[0] -= moveDir[0] * outwardSpeed * 0.72;
+        this.vel[1] -= moveDir[1] * outwardSpeed * 0.72;
+      }
+    }
   }
 
   constrainToBounds() {
@@ -692,6 +778,7 @@ class Die {
     this.omega[2] *= Math.pow(0.97, dt * 60);
 
     this.constrainToBounds();
+    this.constrainToViewport();
 
     const restingHeight = this.getRestingHeight();
     const speed = len3(this.vel) + len3(this.omega) * 0.1;
