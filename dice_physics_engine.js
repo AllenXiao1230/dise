@@ -1,5 +1,9 @@
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const DICE_MODEL_URL = "./models/dice.glb";
+
 const cv = document.getElementById("c");
-const ctx = cv.getContext("2d");
 const cw = document.getElementById("cw");
 const controls = document.getElementById("controls");
 const bm = document.getElementById("bm");
@@ -7,41 +11,76 @@ const bp = document.getElementById("bp");
 const cdis = document.getElementById("cdis");
 const hint = document.getElementById("hint");
 
-let W = 0, H = 0;
+const renderer = new THREE.WebGLRenderer({
+  canvas: cv,
+  antialias: true,
+  alpha: true,
+});
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0x000000, 0);
+
+const scene = new THREE.Scene();
+
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 4000);
+camera.up.set(0, 0, 1);
+scene.add(camera);
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.72);
+const hemiLight = new THREE.HemisphereLight(0xd9e9ff, 0x29364b, 1.12);
+const dirLight = new THREE.DirectionalLight(0xfff4df, 1.6);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048, 2048);
+scene.add(ambientLight, hemiLight, dirLight, dirLight.target);
+
+const floorVisual = new THREE.Mesh(
+  new THREE.PlaneGeometry(1, 1),
+  new THREE.MeshStandardMaterial({
+    color: 0x13243c,
+    roughness: 0.95,
+    metalness: 0.03,
+    transparent: true,
+    opacity: 0.55,
+  })
+);
+floorVisual.receiveShadow = true;
+scene.add(floorVisual);
+
+const floorShadow = new THREE.Mesh(
+  new THREE.PlaneGeometry(1, 1),
+  new THREE.ShadowMaterial({
+    color: 0x000000,
+    opacity: 0.24,
+  })
+);
+floorShadow.receiveShadow = true;
+scene.add(floorShadow);
+
+const grid = new THREE.GridHelper(1, 24, 0x45638a, 0x233750);
+grid.rotation.x = Math.PI / 2;
+const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
+gridMaterials.forEach((mat) => {
+  mat.transparent = true;
+  mat.opacity = 0.42;
+});
+scene.add(grid);
+
+const raycaster = new THREE.Raycaster();
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const ndc = new THREE.Vector2();
+const CAMERA_DIR = new THREE.Vector3(1.12, -1.18, 0.92).normalize();
+
+let W = 0;
+let H = 0;
 let VIEW_PAD_X = 24;
 let VIEW_PAD_TOP = 84;
 let VIEW_PAD_BOTTOM = 28;
 
 // Quaternion helpers
-function qMul(a, b) {
-  return [
-    a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
-    a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
-    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
-    a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
-  ];
-}
-
 function qNorm(q) {
-  const l = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+  const l = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]) || 1;
   return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
-}
-
-function qIdent() {
-  return [1, 0, 0, 0];
-}
-
-function qRotV(q, v) {
-  const [w, x, y, z] = q;
-  const [vx, vy, vz] = v;
-  const tx = 2 * (y * vz - z * vy);
-  const ty = 2 * (z * vx - x * vz);
-  const tz = 2 * (x * vy - y * vx);
-  return [
-    vx + w * tx + y * tz - z * ty,
-    vy + w * ty + z * tx - x * tz,
-    vz + w * tz + x * ty - y * tx,
-  ];
 }
 
 function qDeriv(q, omega) {
@@ -108,135 +147,14 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function qFromAxisAngle(axis, angle) {
-  const n = norm3(axis);
-  const s = Math.sin(angle / 2);
-  return qNorm([Math.cos(angle / 2), n[0] * s, n[1] * s, n[2] * s]);
-}
-
-function qFromTo(from, to) {
-  const a = norm3(from);
-  const b = norm3(to);
-  const d = dot3(a, b);
-  if (d > 0.9999) return qIdent();
-  if (d < -0.9999) {
-    const axis = len3(cross3(a, [1, 0, 0])) > 0.001 ? cross3(a, [1, 0, 0]) : cross3(a, [0, 1, 0]);
-    return qFromAxisAngle(axis, Math.PI);
-  }
-  const axis = cross3(a, b);
-  return qNorm([1 + d, axis[0], axis[1], axis[2]]);
-}
-
-function lerp2(a, b, t) {
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-}
-
-function quadPoint(pts, u, v) {
-  const left = lerp2(pts[0], pts[3], v);
-  const right = lerp2(pts[1], pts[2], v);
-  return lerp2(left, right, u);
-}
-
-function avg2(pts) {
-  const s = pts.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-  return { x: s.x / pts.length, y: s.y / pts.length };
-}
-
-function insetQuad(pts, scale) {
-  const c = avg2(pts);
-  return pts.map((p) => ({ x: c.x + (p.x - c.x) * scale, y: c.y + (p.y - c.y) * scale }));
-}
-
-function minQuadEdge(pts) {
-  let minEdge = Infinity;
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i];
-    const b = pts[(i + 1) % pts.length];
-    minEdge = Math.min(minEdge, Math.hypot(b.x - a.x, b.y - a.y));
-  }
-  return minEdge;
-}
-
-function drawQuadPath(pts, radius = 0) {
-  if (radius <= 0.5) {
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-    ctx.closePath();
-    return;
-  }
-
-  ctx.beginPath();
-  for (let i = 0; i < pts.length; i++) {
-    const prev = pts[(i + pts.length - 1) % pts.length];
-    const cur = pts[i];
-    const next = pts[(i + 1) % pts.length];
-    const prevLen = Math.hypot(prev.x - cur.x, prev.y - cur.y) || 1;
-    const nextLen = Math.hypot(next.x - cur.x, next.y - cur.y) || 1;
-    const cornerRadius = Math.min(radius, prevLen * 0.36, nextLen * 0.36);
-    const start = {
-      x: cur.x + ((prev.x - cur.x) / prevLen) * cornerRadius,
-      y: cur.y + ((prev.y - cur.y) / prevLen) * cornerRadius,
-    };
-    const end = {
-      x: cur.x + ((next.x - cur.x) / nextLen) * cornerRadius,
-      y: cur.y + ((next.y - cur.y) / nextLen) * cornerRadius,
-    };
-
-    if (i === 0) {
-      ctx.moveTo(start.x, start.y);
-    } else {
-      ctx.lineTo(start.x, start.y);
-    }
-    ctx.quadraticCurveTo(cur.x, cur.y, end.x, end.y);
-  }
-  ctx.closePath();
-}
-
-// Projection
-const ISO = Math.PI / 6;
-const ISO_C = Math.cos(ISO), ISO_S = Math.sin(ISO);
-const VIEW_DIR = norm3([1, 1, 1]);
-const LIGHT_DIR = norm3([-0.6, -0.4, 1.25]);
-
-function iso(x, y, z) {
-  return { x: W / 2 + (x - y) * ISO_C, y: H * 0.60 + (x + y) * ISO_S - z };
-}
-
-function screenToFloor(sx, sy, z = 0) {
-  const a = (sx - W / 2) / ISO_C;
-  const b = (sy - H * 0.60 + z) / ISO_S;
-  return [(a + b) / 2, (b - a) / 2];
-}
-
-// Die faces
-const FACE_DEFS = [
-  { normal: [0, 0, 1], value: 1, corners: [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]] },
-  { normal: [0, 0, -1], value: 6, corners: [[-1, 1, -1], [1, 1, -1], [1, -1, -1], [-1, -1, -1]] },
-  { normal: [1, 0, 0], value: 3, corners: [[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]] },
-  { normal: [-1, 0, 0], value: 4, corners: [[-1, 1, -1], [-1, -1, -1], [-1, -1, 1], [-1, 1, 1]] },
-  { normal: [0, 1, 0], value: 2, corners: [[-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]] },
-  { normal: [0, -1, 0], value: 5, corners: [[1, -1, -1], [-1, -1, -1], [-1, -1, 1], [1, -1, 1]] },
+const FACE_NORMALS = [
+  [0, 0, 1],
+  [0, 0, -1],
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
 ];
-const FACE_NORMALS = FACE_DEFS.map((face) => face.normal);
-const DOTS = {
-  1: [[1, 1]],
-  2: [[0, 0], [2, 2]],
-  3: [[0, 0], [1, 1], [2, 2]],
-  4: [[0, 0], [0, 2], [2, 0], [2, 2]],
-  5: [[0, 0], [0, 2], [1, 1], [2, 0], [2, 2]],
-  6: [[0, 0], [0, 1], [0, 2], [2, 0], [2, 1], [2, 2]],
-};
-
-const DICE_MATERIAL = {
-  hue: 38,
-  saturation: 20,
-  baseLight: 88,
-  bevelLight: 76,
-  pipColor: "#18110d",
-  pipWarm: "#3d2419",
-  stroke: "rgba(82,70,57,0.88)",
-};
 
 // Physics constants
 const GRAVITY = 2350;
@@ -255,57 +173,211 @@ const TILT_RECOVERY_FORCE = 22;
 const TILT_RECOVERY_DOT = 0.58;
 
 let HALF = 22;
-let INERTIA = 2 / 3 * MASS * (HALF * 2) * (HALF * 2) / 6;
-let WALL_BOUND = 230;
-let GRID_SPACING = 42;
-let GRID_LINES = 7;
-
+let INERTIA = (2 / 3) * MASS * (HALF * 2) * (HALF * 2) / 6;
 let diceCount = 1;
 let rolling = false;
 let raf = null;
 let dice = [];
 let lastTs = null;
 let gT = 0;
+let diceTemplate = createFallbackDiceTemplate();
+
+const WORLD_BOUNDS = {
+  minX: -220,
+  maxX: 220,
+  minY: -220,
+  maxY: 220,
+};
+
+function createFallbackDiceTemplate() {
+  const root = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshStandardMaterial({
+      color: 0xf1e5d0,
+      roughness: 0.76,
+      metalness: 0.02,
+    })
+  );
+  body.castShadow = true;
+  body.receiveShadow = true;
+  root.add(body);
+  return root;
+}
+
+function setModelShadowFlags(object) {
+  object.traverse((node) => {
+    if (!node.isMesh) return;
+    node.castShadow = true;
+    node.receiveShadow = true;
+    if (Array.isArray(node.material)) {
+      node.material = node.material.map((mat) => mat.clone());
+    } else if (node.material) {
+      node.material = node.material.clone();
+    }
+  });
+}
+
+function normalizeDiceTemplate(source) {
+  const wrapper = new THREE.Group();
+  const content = source.clone(true);
+  setModelShadowFlags(content);
+
+  const box = new THREE.Box3().setFromObject(content);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+
+  content.position.sub(center);
+  content.scale.multiplyScalar(1 / maxDim);
+
+  // glTF assets are commonly authored Y-up; rotate once into this scene's Z-up world.
+  wrapper.rotation.x = Math.PI / 2;
+  wrapper.add(content);
+  return wrapper;
+}
+
+function makeDiceVisual() {
+  return diceTemplate.clone(true);
+}
+
+async function loadDiceTemplate() {
+  const loader = new GLTFLoader();
+  hint.textContent = "載入 GLB 中…";
+  try {
+    const gltf = await loader.loadAsync(DICE_MODEL_URL);
+    diceTemplate = normalizeDiceTemplate(gltf.scene);
+    dice.forEach((die) => die.refreshVisual());
+    if (!rolling) hint.textContent = "點擊擲骰";
+  } catch (error) {
+    console.warn(`Failed to load ${DICE_MODEL_URL}. Falling back to a simple cube.`, error);
+    if (!rolling) hint.textContent = "未找到 models/dice.glb，暫用方塊";
+  }
+}
+
+function screenToFloor(sx, sy) {
+  ndc.x = (sx / W) * 2 - 1;
+  ndc.y = -(sy / H) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const point = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(groundPlane, point)) return [0, 0];
+  return [point.x, point.y];
+}
+
+function updateCamera() {
+  const aspect = W / H;
+  const viewHeight = clamp(HALF * 18, 360, 560);
+  const halfViewHeight = viewHeight / 2;
+  const halfViewWidth = halfViewHeight * aspect;
+
+  camera.left = -halfViewWidth;
+  camera.right = halfViewWidth;
+  camera.top = halfViewHeight;
+  camera.bottom = -halfViewHeight;
+  camera.near = 0.1;
+  camera.far = viewHeight * 8;
+
+  const focus = new THREE.Vector3(0, 0, HALF * 0.7);
+  camera.position.copy(CAMERA_DIR).multiplyScalar(viewHeight * 2.2).add(focus);
+  camera.lookAt(focus);
+  camera.updateProjectionMatrix();
+}
+
+function updateWorldBounds() {
+  const samples = [
+    [VIEW_PAD_X, VIEW_PAD_TOP],
+    [W * 0.5, VIEW_PAD_TOP],
+    [W - VIEW_PAD_X, VIEW_PAD_TOP],
+    [VIEW_PAD_X, H * 0.5],
+    [W - VIEW_PAD_X, H * 0.5],
+    [VIEW_PAD_X, H - VIEW_PAD_BOTTOM],
+    [W * 0.5, H - VIEW_PAD_BOTTOM],
+    [W - VIEW_PAD_X, H - VIEW_PAD_BOTTOM],
+  ].map(([sx, sy]) => screenToFloor(sx, sy));
+
+  const margin = HALF * 1.4;
+  let minX = Math.min(...samples.map((point) => point[0])) + margin;
+  let maxX = Math.max(...samples.map((point) => point[0])) - margin;
+  let minY = Math.min(...samples.map((point) => point[1])) + margin;
+  let maxY = Math.max(...samples.map((point) => point[1])) - margin;
+
+  if (maxX - minX < HALF * 10) {
+    const cx = (minX + maxX) * 0.5;
+    minX = cx - HALF * 5;
+    maxX = cx + HALF * 5;
+  }
+  if (maxY - minY < HALF * 10) {
+    const cy = (minY + maxY) * 0.5;
+    minY = cy - HALF * 5;
+    maxY = cy + HALF * 5;
+  }
+
+  WORLD_BOUNDS.minX = minX;
+  WORLD_BOUNDS.maxX = maxX;
+  WORLD_BOUNDS.minY = minY;
+  WORLD_BOUNDS.maxY = maxY;
+}
+
+function updateFloorAndLights() {
+  const width = Math.max(HALF * 18, WORLD_BOUNDS.maxX - WORLD_BOUNDS.minX + HALF * 8);
+  const depth = Math.max(HALF * 18, WORLD_BOUNDS.maxY - WORLD_BOUNDS.minY + HALF * 8);
+  const cx = (WORLD_BOUNDS.minX + WORLD_BOUNDS.maxX) * 0.5;
+  const cy = (WORLD_BOUNDS.minY + WORLD_BOUNDS.maxY) * 0.5;
+  const span = Math.max(width, depth);
+
+  floorVisual.position.set(cx, cy, -0.4);
+  floorShadow.position.set(cx, cy, 0.02);
+  floorVisual.scale.set(width, depth, 1);
+  floorShadow.scale.set(width, depth, 1);
+
+  grid.position.set(cx, cy, 0.08);
+  grid.scale.setScalar(span);
+
+  dirLight.position.set(cx + span * 0.32, cy - span * 0.28, HALF * 20);
+  dirLight.target.position.set(cx, cy, HALF * 0.65);
+
+  dirLight.shadow.camera.left = -span * 0.62;
+  dirLight.shadow.camera.right = span * 0.62;
+  dirLight.shadow.camera.top = span * 0.62;
+  dirLight.shadow.camera.bottom = -span * 0.62;
+  dirLight.shadow.camera.near = 1;
+  dirLight.shadow.camera.far = HALF * 42;
+  dirLight.shadow.bias = -0.00008;
+  dirLight.shadow.normalBias = 0.018;
+  dirLight.shadow.camera.updateProjectionMatrix();
+}
 
 function recalcSceneMetrics() {
   const rect = cw.getBoundingClientRect();
   const controlsRect = controls.getBoundingClientRect();
   W = Math.max(320, Math.round(rect.width));
   H = Math.max(420, Math.round(rect.height));
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  cv.width = Math.round(W * dpr);
-  cv.height = Math.round(H * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.imageSmoothingEnabled = true;
-  HALF = clamp(Math.round(Math.min(W, H) * 0.052), 20, 30);
-  INERTIA = 2 / 3 * MASS * (HALF * 2) * (HALF * 2) / 6;
-  VIEW_PAD_X = clamp(W * 0.04, 22, 42);
-  VIEW_PAD_TOP = clamp(controlsRect.bottom - rect.top + 20, 78, Math.max(92, H * 0.18));
-  VIEW_PAD_BOTTOM = clamp(H * 0.045, 24, 42);
-  const cornerExtent = Math.sqrt(3) * HALF;
-  const usableU = Math.max(HALF * 9, ((W * 0.5) - VIEW_PAD_X - 2 * cornerExtent * ISO_C) / ISO_C);
-  const usableVFront = Math.max(HALF * 9, (H - VIEW_PAD_BOTTOM - (H * 0.60 + cornerExtent)) / ISO_S);
-  const usableVBack = Math.max(HALF * 9, ((H * 0.60) - VIEW_PAD_TOP - cornerExtent) / ISO_S);
-  WALL_BOUND = Math.max(HALF * 4.6, Math.min(usableU * 0.5, usableVFront * 0.5, usableVBack * 0.5));
-  GRID_SPACING = clamp(Math.round(Math.min(W, H) * 0.086), 36, 72);
-  GRID_LINES = Math.ceil(WALL_BOUND / GRID_SPACING) + 2;
-}
 
-function renderScene() {
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = "#0a1020";
-  ctx.fillRect(0, 0, W, H);
-  drawFloor();
-  const sorted = [...dice].sort((a, b) => dot3(a.pos, VIEW_DIR) - dot3(b.pos, VIEW_DIR));
-  sorted.forEach((d) => d.draw());
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(W, H, false);
+
+  HALF = clamp(Math.round(Math.min(W, H) * 0.052), 20, 30);
+  INERTIA = (2 / 3) * MASS * (HALF * 2) * (HALF * 2) / 6;
+
+  VIEW_PAD_X = clamp(W * 0.04, 22, 42);
+  VIEW_PAD_TOP = clamp(controlsRect.bottom - rect.top + 20, 78, Math.max(96, H * 0.18));
+  VIEW_PAD_BOTTOM = clamp(H * 0.05, 24, 40);
+
+  updateCamera();
+  updateWorldBounds();
+  updateFloorAndLights();
+
+  dice.forEach((die) => die.syncScale());
 }
 
 class Die {
   constructor(delay, spawnPos, launchVel) {
     this.delay = delay;
     this.pos = [
-      clamp(spawnPos[0] + (Math.random() - 0.5) * HALF * 0.24, -WALL_BOUND + HALF, WALL_BOUND - HALF),
-      clamp(spawnPos[1] + (Math.random() - 0.5) * HALF * 0.24, -WALL_BOUND + HALF, WALL_BOUND - HALF),
+      clamp(spawnPos[0] + (Math.random() - 0.5) * HALF * 0.24, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+      clamp(spawnPos[1] + (Math.random() - 0.5) * HALF * 0.24, WORLD_BOUNDS.minY, WORLD_BOUNDS.maxY),
       HALF + 20 + Math.random() * 12,
     ];
     this.vel = [
@@ -319,7 +391,33 @@ class Die {
     this.settled = false;
     this.settleTimer = 0;
     this.life = 0;
-    this.alpha = 1;
+
+    this.root = new THREE.Group();
+    this.visual = null;
+    this.refreshVisual();
+    scene.add(this.root);
+    this.syncVisual();
+  }
+
+  refreshVisual() {
+    if (this.visual) this.root.remove(this.visual);
+    this.visual = makeDiceVisual();
+    this.root.add(this.visual);
+    this.syncScale();
+  }
+
+  syncScale() {
+    if (!this.visual) return;
+    this.visual.scale.setScalar(HALF * 1.98);
+  }
+
+  syncVisual() {
+    this.root.position.set(this.pos[0], this.pos[1], this.pos[2]);
+    this.root.quaternion.set(this.q[1], this.q[2], this.q[3], this.q[0]);
+  }
+
+  dispose() {
+    scene.remove(this.root);
   }
 
   getUpFaceInfo(mat = qToMat(this.q)) {
@@ -348,80 +446,25 @@ class Die {
     return -minZ;
   }
 
-  getProjectedBounds(mat = qToMat(this.q)) {
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (let sx = -1; sx <= 1; sx += 2) {
-      for (let sy = -1; sy <= 1; sy += 2) {
-        for (let sz = -1; sz <= 1; sz += 2) {
-          const world = add3(this.pos, matMulV(mat, [sx * HALF, sy * HALF, sz * HALF]));
-          const pt = iso(world[0], world[1], world[2]);
-          if (pt.x < minX) minX = pt.x;
-          if (pt.x > maxX) maxX = pt.x;
-          if (pt.y < minY) minY = pt.y;
-          if (pt.y > maxY) maxY = pt.y;
-        }
-      }
-    }
-    return { minX, maxX, minY, maxY };
-  }
-
-  constrainToViewport(mat = qToMat(this.q)) {
-    let bounds = this.getProjectedBounds(mat);
-    const leftOverflow = VIEW_PAD_X - bounds.minX;
-    if (leftOverflow > 0) {
-      const deltaU = leftOverflow / ISO_C;
-      this.pos[0] += deltaU * 0.5;
-      this.pos[1] -= deltaU * 0.5;
-      const uVel = this.vel[0] - this.vel[1];
-      if (uVel < 0) {
-        this.vel[0] += (-uVel) * 0.38;
-        this.vel[1] -= (-uVel) * 0.38;
-      }
+  constrainToBounds() {
+    if (this.pos[0] < WORLD_BOUNDS.minX) {
+      this.pos[0] = WORLD_BOUNDS.minX;
+      if (this.vel[0] < 0) this.vel[0] *= -0.48;
+      this.vel[1] *= 0.94;
+    } else if (this.pos[0] > WORLD_BOUNDS.maxX) {
+      this.pos[0] = WORLD_BOUNDS.maxX;
+      if (this.vel[0] > 0) this.vel[0] *= -0.48;
+      this.vel[1] *= 0.94;
     }
 
-    bounds = this.getProjectedBounds(mat);
-    const rightOverflow = bounds.maxX - (W - VIEW_PAD_X);
-    if (rightOverflow > 0) {
-      const deltaU = rightOverflow / ISO_C;
-      this.pos[0] -= deltaU * 0.5;
-      this.pos[1] += deltaU * 0.5;
-      const uVel = this.vel[0] - this.vel[1];
-      if (uVel > 0) {
-        this.vel[0] -= uVel * 0.38;
-        this.vel[1] += uVel * 0.38;
-      }
-    }
-
-    bounds = this.getProjectedBounds(mat);
-    const bottomOverflow = bounds.maxY - (H - VIEW_PAD_BOTTOM);
-    if (bottomOverflow > 0) {
-      const deltaV = bottomOverflow / ISO_S;
-      this.pos[0] -= deltaV * 0.5;
-      this.pos[1] -= deltaV * 0.5;
-      const vVel = this.vel[0] + this.vel[1];
-      if (vVel > 0) {
-        this.vel[0] -= vVel * 0.19;
-        this.vel[1] -= vVel * 0.19;
-      }
-    }
-
-    bounds = this.getProjectedBounds(mat);
-    const topOverflow = VIEW_PAD_TOP - bounds.minY;
-    if (topOverflow > 0) {
-      this.pos[2] = Math.max(this.getRestingHeight(mat), this.pos[2] - topOverflow);
-      if (this.vel[2] > 0) this.vel[2] *= -0.28;
-      bounds = this.getProjectedBounds(mat);
-      const stillTopOverflow = VIEW_PAD_TOP - bounds.minY;
-      if (stillTopOverflow > 0) {
-        const deltaV = stillTopOverflow / ISO_S;
-        this.pos[0] += deltaV * 0.5;
-        this.pos[1] += deltaV * 0.5;
-        const vVel = this.vel[0] + this.vel[1];
-        if (vVel < 0) {
-          this.vel[0] += (-vVel) * 0.19;
-          this.vel[1] += (-vVel) * 0.19;
-        }
-      }
+    if (this.pos[1] < WORLD_BOUNDS.minY) {
+      this.pos[1] = WORLD_BOUNDS.minY;
+      if (this.vel[1] < 0) this.vel[1] *= -0.48;
+      this.vel[0] *= 0.94;
+    } else if (this.pos[1] > WORLD_BOUNDS.maxY) {
+      this.pos[1] = WORLD_BOUNDS.maxY;
+      if (this.vel[1] > 0) this.vel[1] *= -0.48;
+      this.vel[0] *= 0.94;
     }
   }
 
@@ -444,7 +487,12 @@ class Die {
     this.pos = add3(this.pos, scale3(this.vel, dt));
 
     const dq = qDeriv(this.q, this.omega);
-    this.q = qNorm([this.q[0] + dq[0] * dt, this.q[1] + dq[1] * dt, this.q[2] + dq[2] * dt, this.q[3] + dq[3] * dt]);
+    this.q = qNorm([
+      this.q[0] + dq[0] * dt,
+      this.q[1] + dq[1] * dt,
+      this.q[2] + dq[2] * dt,
+      this.q[3] + dq[3] * dt,
+    ]);
 
     const mat = qToMat(this.q);
     let penetration = 0;
@@ -481,7 +529,7 @@ class Die {
       if (vNorm < -MICRO_BOUNCE_SPEED) {
         const rCrossN = [r[1], -r[0], 0];
         const denom = 1 / MASS + dot3(rCrossN, scale3(rCrossN, 1 / INERTIA));
-        const jn = -(1 + RESTITUTION) * vNorm / denom;
+        const jn = -((1 + RESTITUTION) * vNorm) / denom;
         this.vel[2] += jn / MASS;
         const torque = scale3(cross3(r, [0, 0, jn]), 1 / INERTIA);
         this.omega = add3(this.omega, torque);
@@ -521,7 +569,7 @@ class Die {
         const spinFactor = clamp(1 - angSpeed / STABLE_ANG_SPEED, 0, 1);
         const settleBias = clamp((upInfo.dot - TILT_RECOVERY_DOT) / (1 - TILT_RECOVERY_DOT), 0, 1);
         const recoveryStrength = TILT_RECOVERY_FORCE * slideFactor * spinFactor * (0.35 + 0.65 * settleBias);
-        this.omega = add3(this.omega, scale3(recoveryAxis, recoveryStrength * dt * 60 / recoveryLen));
+        this.omega = add3(this.omega, scale3(recoveryAxis, (recoveryStrength * dt * 60) / recoveryLen));
       }
 
       const settleBias = clamp((upInfo.dot - TILT_RECOVERY_DOT) / (1 - TILT_RECOVERY_DOT), 0, 1);
@@ -542,16 +590,7 @@ class Die {
     this.omega[1] *= Math.pow(0.97, dt * 60);
     this.omega[2] *= Math.pow(0.97, dt * 60);
 
-    if (Math.abs(this.pos[0]) > WALL_BOUND) {
-      this.vel[0] *= -0.5;
-      this.pos[0] = Math.sign(this.pos[0]) * WALL_BOUND;
-    }
-    if (Math.abs(this.pos[1]) > WALL_BOUND) {
-      this.vel[1] *= -0.5;
-      this.pos[1] = Math.sign(this.pos[1]) * WALL_BOUND;
-    }
-
-    this.constrainToViewport(mat);
+    this.constrainToBounds();
 
     const speed = len3(this.vel) + len3(this.omega) * 0.1;
     if (this.pos[2] <= HALF + 1 && speed < SETTLE_SPEED) {
@@ -560,156 +599,14 @@ class Die {
     } else {
       this.settleTimer = 0;
     }
+
     if (this.life > FORCE_SETTLE_TIME) this.settleNow();
   }
+}
 
-  draw() {
-    const mat = qToMat(this.q);
-    const [px, py, pz] = this.pos;
-    const s = HALF;
-    ctx.globalAlpha = this.alpha;
-
-    const sc = iso(px, py, 0);
-    const h = Math.max(0, pz - this.getRestingHeight(mat));
-    const ss = Math.max(0.22, 1 - h / 160);
-    ctx.save();
-    ctx.shadowColor = "rgba(0,0,0,0.22)";
-    ctx.shadowBlur = 18 * ss;
-    ctx.beginPath();
-    ctx.ellipse(sc.x, sc.y, s * 1.0 * ss, s * 0.5 * ss, 0, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(0,0,0,${0.48 - ss * 0.12})`;
-    ctx.fill();
-    ctx.restore();
-    ctx.globalAlpha = this.alpha;
-
-    const faces = FACE_DEFS.map((face) => {
-      const worldNormal = matMulV(mat, face.normal);
-      const visibility = dot3(worldNormal, VIEW_DIR);
-      if (visibility <= 0.02) return null;
-      const worldCorners = face.corners.map(([x, y, z]) => add3(this.pos, matMulV(mat, [x * s, y * s, z * s])));
-      const pts = worldCorners.map(([x, y, z]) => iso(x, y, z));
-      const center = worldCorners.reduce((acc, p) => add3(acc, p), [0, 0, 0]).map((v) => v / 4);
-      return {
-        value: face.value,
-        pts,
-        depth: dot3(center, VIEW_DIR),
-        light: clamp(0.72 + Math.max(0, dot3(worldNormal, LIGHT_DIR)) * 0.22 + Math.max(0, worldNormal[2]) * 0.08, 0.58, 1),
-      };
-    }).filter(Boolean).sort((a, b) => a.depth - b.depth);
-
-    ctx.lineJoin = "round";
-    faces.forEach((face) => {
-      const edgeSize = minQuadEdge(face.pts);
-      const outerRadius = clamp(edgeSize * 0.12, 2.8, 8.5);
-      const inner = insetQuad(face.pts, 0.84);
-      const innerRadius = outerRadius * 0.75;
-      const highlight = insetQuad(face.pts, 0.92);
-      const faceTone = clamp(DICE_MATERIAL.baseLight + face.light * 7, 86, 97);
-      const bevelTone = clamp(DICE_MATERIAL.bevelLight + face.light * 6, 72, 88);
-      const saturation = clamp(DICE_MATERIAL.saturation + face.light * 5, 16, 28);
-      const bounds = face.pts.reduce((acc, p) => ({
-        minX: Math.min(acc.minX, p.x),
-        maxX: Math.max(acc.maxX, p.x),
-        minY: Math.min(acc.minY, p.y),
-        maxY: Math.max(acc.maxY, p.y),
-      }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
-
-      drawQuadPath(face.pts, outerRadius);
-      ctx.fillStyle = `hsl(${DICE_MATERIAL.hue} ${saturation}% ${bevelTone}%)`;
-      ctx.fill();
-      ctx.strokeStyle = DICE_MATERIAL.stroke;
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-
-      ctx.save();
-      drawQuadPath(inner, innerRadius);
-      ctx.clip();
-      const material = ctx.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
-      material.addColorStop(0, `hsl(${DICE_MATERIAL.hue} ${saturation + 4}% ${Math.min(98, faceTone + 4)}%)`);
-      material.addColorStop(0.42, `hsl(${DICE_MATERIAL.hue} ${saturation}% ${faceTone}%)`);
-      material.addColorStop(1, `hsl(${DICE_MATERIAL.hue - 2} ${saturation + 3}% ${Math.max(72, faceTone - 13)}%)`);
-      ctx.fillStyle = material;
-      ctx.fillRect(bounds.minX - 4, bounds.minY - 4, bounds.maxX - bounds.minX + 8, bounds.maxY - bounds.minY + 8);
-
-      const bloom = ctx.createRadialGradient(
-        bounds.minX + (bounds.maxX - bounds.minX) * 0.34,
-        bounds.minY + (bounds.maxY - bounds.minY) * 0.28,
-        0,
-        bounds.minX + (bounds.maxX - bounds.minX) * 0.38,
-        bounds.minY + (bounds.maxY - bounds.minY) * 0.32,
-        Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) * 0.95
-      );
-      bloom.addColorStop(0, "rgba(255,255,255,0.24)");
-      bloom.addColorStop(0.38, "rgba(255,255,255,0.10)");
-      bloom.addColorStop(1, "rgba(255,255,255,0)");
-      ctx.fillStyle = bloom;
-      ctx.fillRect(bounds.minX - 4, bounds.minY - 4, bounds.maxX - bounds.minX + 8, bounds.maxY - bounds.minY + 8);
-
-      const edgeShade = ctx.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
-      edgeShade.addColorStop(0, "rgba(255,255,255,0.06)");
-      edgeShade.addColorStop(0.52, "rgba(255,255,255,0)");
-      edgeShade.addColorStop(1, "rgba(69,48,37,0.18)");
-      ctx.fillStyle = edgeShade;
-      ctx.fillRect(bounds.minX - 4, bounds.minY - 4, bounds.maxX - bounds.minX + 8, bounds.maxY - bounds.minY + 8);
-      ctx.restore();
-
-      drawQuadPath(inner, innerRadius);
-      ctx.strokeStyle = "rgba(255,247,235,0.18)";
-      ctx.lineWidth = 0.95;
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(highlight[0].x, highlight[0].y);
-      ctx.lineTo(highlight[1].x, highlight[1].y);
-      ctx.moveTo(highlight[0].x, highlight[0].y);
-      ctx.lineTo(highlight[3].x, highlight[3].y);
-      ctx.strokeStyle = "rgba(255,255,255,0.28)";
-      ctx.lineWidth = 1.15;
-      ctx.stroke();
-
-      const dl = DOTS[face.value];
-      if (!dl) return;
-      const pipRadius = clamp(edgeSize * 0.094, 2.8, 5.4);
-      dl.forEach(([row, col]) => {
-        const pt = quadPoint(inner, (col + 0.5) / 3, (row + 0.5) / 3);
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, pipRadius * 1.18, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(61,38,30,0.10)";
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(pt.x + pipRadius * 0.16, pt.y + pipRadius * 0.2, pipRadius * 1.04, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(0,0,0,0.16)";
-        ctx.fill();
-
-        const cavity = ctx.createRadialGradient(
-          pt.x - pipRadius * 0.3,
-          pt.y - pipRadius * 0.34,
-          pipRadius * 0.18,
-          pt.x,
-          pt.y,
-          pipRadius
-        );
-        cavity.addColorStop(0, "rgba(111,67,48,0.42)");
-        cavity.addColorStop(0.34, DICE_MATERIAL.pipWarm);
-        cavity.addColorStop(1, DICE_MATERIAL.pipColor);
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, pipRadius, 0, Math.PI * 2);
-        ctx.fillStyle = cavity;
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, pipRadius * 0.66, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(0,0,0,0.10)";
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(pt.x - pipRadius * 0.24, pt.y - pipRadius * 0.22, pipRadius * 0.34, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(255,255,255,0.14)";
-        ctx.fill();
-      });
-    });
-    ctx.globalAlpha = 1;
-  }
+function clearDice() {
+  dice.forEach((die) => die.dispose());
+  dice = [];
 }
 
 function collideDice(a, b) {
@@ -719,9 +616,11 @@ function collideDice(a, b) {
   const dist = Math.sqrt(dx * dx + dy * dy);
   const minD = HALF * 2.18;
   if (dist > minD || dist < 0.01) return;
+
   const pen = minD - dist;
   const nx = dx / dist;
   const ny = dy / dist;
+
   if (!a.settled) {
     a.pos[0] -= nx * pen * 0.5;
     a.pos[1] -= ny * pen * 0.5;
@@ -730,10 +629,12 @@ function collideDice(a, b) {
     b.pos[0] += nx * pen * 0.5;
     b.pos[1] += ny * pen * 0.5;
   }
+
   const vRel = [b.vel[0] - a.vel[0], b.vel[1] - a.vel[1], 0];
   const vN = vRel[0] * nx + vRel[1] * ny;
   if (vN > 0) return;
-  const j = -(1 + 0.35) * vN / 2;
+
+  const j = -((1 + 0.35) * vN) / 2;
   if (!a.settled) {
     a.vel[0] -= j * nx;
     a.vel[1] -= j * ny;
@@ -744,25 +645,9 @@ function collideDice(a, b) {
   }
 }
 
-function drawFloor() {
-  const sp = GRID_SPACING;
-  const lines = GRID_LINES;
-  ctx.strokeStyle = "#1e2d4a";
-  ctx.lineWidth = 0.6;
-  for (let i = -lines; i <= lines; i++) {
-    const a = iso(i * sp, -lines * sp, 0);
-    const b = iso(i * sp, lines * sp, 0);
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.stroke();
-    const c = iso(-lines * sp, i * sp, 0);
-    const d = iso(lines * sp, i * sp, 0);
-    ctx.beginPath();
-    ctx.moveTo(c.x, c.y);
-    ctx.lineTo(d.x, d.y);
-    ctx.stroke();
-  }
+function renderScene() {
+  dice.forEach((die) => die.syncVisual());
+  renderer.render(scene, camera);
 }
 
 function loop(ts) {
@@ -771,53 +656,64 @@ function loop(ts) {
   lastTs = ts;
   gT += dt;
 
-  const SUB = Math.max(5, Math.min(8, Math.ceil(dt / (1 / 300))));
-  const sdt = dt / SUB;
-  for (let s = 0; s < SUB; s++) {
-    dice.forEach((d) => {
-      if (gT >= d.delay) d.active = true;
-      d.step(sdt);
+  const subSteps = Math.max(5, Math.min(8, Math.ceil(dt / (1 / 300))));
+  const sdt = dt / subSteps;
+  for (let step = 0; step < subSteps; step++) {
+    dice.forEach((die) => {
+      if (gT >= die.delay) die.active = true;
+      die.step(sdt);
     });
     for (let i = 0; i < dice.length; i++) {
       for (let j = i + 1; j < dice.length; j++) collideDice(dice[i], dice[j]);
     }
   }
-  if (gT > FORCE_SETTLE_TIME) dice.forEach((d) => d.settleNow());
+
+  if (gT > FORCE_SETTLE_TIME) dice.forEach((die) => die.settleNow());
 
   renderScene();
 
-  const allDone = dice.length > 0 && dice.every((d) => d.settled);
+  const allDone = dice.length > 0 && dice.every((die) => die.settled);
   if (!allDone) {
     raf = requestAnimationFrame(loop);
   } else {
     rolling = false;
     hint.style.display = "block";
+    if (hint.textContent === "載入 GLB 中…") hint.textContent = "點擊擲骰";
   }
 }
 
-function getPointerPos(e) {
+function getPointerPos(event) {
   const rect = cv.getBoundingClientRect();
   return {
-    x: e.clientX - rect.left,
-    y: e.clientY - rect.top,
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
   };
 }
 
-function rollDice(e) {
+function rollDice(event) {
   if (rolling) return;
-  const pointer = e ? getPointerPos(e) : { x: W / 2, y: H * 0.34 };
-  const floorPoint = screenToFloor(pointer.x, pointer.y, 0);
+
+  const pointer = event ? getPointerPos(event) : { x: W / 2, y: H * 0.34 };
+  const floorPoint = screenToFloor(pointer.x, pointer.y);
+  const margin = HALF * 1.2;
   const spawnBase = [
-    clamp(floorPoint[0], -WALL_BOUND * 0.78, WALL_BOUND * 0.78),
-    clamp(floorPoint[1], -WALL_BOUND * 0.78, WALL_BOUND * 0.78),
+    clamp(floorPoint[0], WORLD_BOUNDS.minX + margin, WORLD_BOUNDS.maxX - margin),
+    clamp(floorPoint[1], WORLD_BOUNDS.minY + margin, WORLD_BOUNDS.maxY - margin),
   ];
-  const target = [spawnBase[0] * -0.18, spawnBase[1] * -0.28 + GRID_SPACING * 0.7];
+
+  const aimPoint = screenToFloor(W * 0.5, H * 0.68);
+  const target = [
+    clamp(aimPoint[0], WORLD_BOUNDS.minX + margin, WORLD_BOUNDS.maxX - margin),
+    clamp(aimPoint[1], WORLD_BOUNDS.minY + margin, WORLD_BOUNDS.maxY - margin),
+  ];
+
   let throwDir = [target[0] - spawnBase[0], target[1] - spawnBase[1], 0];
   if (len3(throwDir) < 18) throwDir = [0, 1, 0];
   throwDir = norm3(throwDir);
+
   const sideDir = [-throwDir[1], throwDir[0], 0];
   const pathLen = len3([target[0] - spawnBase[0], target[1] - spawnBase[1], 0]);
-  const baseSpeed = clamp(255 + pathLen * 0.34, 255, 340);
+  const baseSpeed = clamp(260 + pathLen * 0.36, 260, 360);
   const burstOffset = Math.random() * Math.PI * 2;
 
   rolling = true;
@@ -825,10 +721,12 @@ function rollDice(e) {
   gT = 0;
   if (raf) cancelAnimationFrame(raf);
   hint.style.display = "none";
+  clearDice();
 
   dice = Array.from({ length: diceCount }, (_, i) => {
     let spawnPos;
     let launchVel;
+
     if (diceCount === 1) {
       spawnPos = add3(spawnBase, scale3(sideDir, 0));
       const forwardSpeed = baseSpeed + (Math.random() - 0.5) * 26;
@@ -836,45 +734,49 @@ function rollDice(e) {
       launchVel = [
         throwDir[0] * forwardSpeed + sideDir[0] * sideSpeed,
         throwDir[1] * forwardSpeed + sideDir[1] * sideSpeed,
-        380 + Math.random() * 96,
+        390 + Math.random() * 110,
       ];
     } else {
       const angle = burstOffset + i * (Math.PI * 2 / diceCount) + (Math.random() - 0.5) * 0.22;
       const radialDir = [Math.cos(angle), Math.sin(angle), 0];
       const tangentDir = [-radialDir[1], radialDir[0], 0];
-      const spawnRadius = HALF * (1.85 + 0.14 * diceCount);
-      const spawnJitter = HALF * 0.35;
-      spawnPos = add3(add3(spawnBase, scale3(radialDir, spawnRadius)), scale3(tangentDir, (Math.random() - 0.5) * spawnJitter));
-      const outwardSpeed = baseSpeed + 55 + (Math.random() - 0.5) * 34;
-      const swirlSpeed = (Math.random() - 0.5) * 22;
+      const spawnRadius = HALF * (1.9 + 0.16 * diceCount);
+      const spawnJitter = HALF * 0.38;
+      spawnPos = add3(
+        add3(spawnBase, scale3(radialDir, spawnRadius)),
+        scale3(tangentDir, (Math.random() - 0.5) * spawnJitter)
+      );
+      const outwardSpeed = baseSpeed + 62 + (Math.random() - 0.5) * 36;
+      const swirlSpeed = (Math.random() - 0.5) * 24;
       launchVel = [
         radialDir[0] * outwardSpeed + tangentDir[0] * swirlSpeed,
         radialDir[1] * outwardSpeed + tangentDir[1] * swirlSpeed,
-        410 + Math.random() * 108,
+        420 + Math.random() * 118,
       ];
     }
+
     return new Die(i * 0.055, spawnPos, launchVel);
   });
 
   raf = requestAnimationFrame(loop);
 }
 
-function chg(d) {
+function chg(delta) {
   if (rolling) return;
-  const n = diceCount + d;
-  if (n < 1 || n > 8) return;
-  diceCount = n;
-  cdis.textContent = n + " 顆";
-  bm.disabled = n <= 1;
-  bp.disabled = n >= 8;
+  const next = diceCount + delta;
+  if (next < 1 || next > 8) return;
+  diceCount = next;
+  cdis.textContent = `${next} 顆`;
+  bm.disabled = next <= 1;
+  bp.disabled = next >= 8;
   renderScene();
 }
 
 bm.addEventListener("click", () => chg(-1));
 bp.addEventListener("click", () => chg(1));
-cv.addEventListener("pointerdown", (e) => {
-  e.preventDefault();
-  rollDice(e);
+cv.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  rollDice(event);
 });
 window.addEventListener("resize", () => {
   recalcSceneMetrics();
@@ -884,3 +786,4 @@ window.addEventListener("resize", () => {
 bm.disabled = true;
 recalcSceneMetrics();
 renderScene();
+loadDiceTemplate();

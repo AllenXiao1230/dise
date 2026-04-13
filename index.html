@@ -20,6 +20,14 @@ linear-gradient(180deg,#0e1730 0%,#0a1224 48%,#08111d 100%)}
 canvas{display:block;width:100%;height:100%}
 #hint{position:absolute;left:50%;bottom:max(18px,calc(env(safe-area-inset-bottom) + 12px));transform:translateX(-50%);font-size:13px;color:rgba(231,236,247,.72);padding:.45rem .8rem;border-radius:999px;background:rgba(8,12,22,.55);backdrop-filter:blur(14px);z-index:3}
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
 </head>
 <body>
 <div id="app">
@@ -32,6 +40,6 @@ canvas{display:block;width:100%;height:100%}
   <div id="cw"><canvas id="c"></canvas></div>
   <div id="hint">點擊擲骰</div>
 </div>
-<script src="./dice_physics_engine.js"></script>
+<script type="module" src="./dice_physics_engine.js"></script>
 </body>
 </html>
