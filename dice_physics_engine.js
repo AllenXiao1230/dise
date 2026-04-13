@@ -147,6 +147,18 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
+function getViewportProfile() {
+  const shortSide = Math.min(W, H);
+  const longSide = Math.max(W, H);
+  return {
+    shortSide,
+    longSide,
+    isPhone: shortSide < 520,
+    isTablet: shortSide >= 520 && shortSide < 900,
+    isDesktop: shortSide >= 900,
+  };
+}
+
 const FACE_NORMALS = [
   [0, 0, 1],
   [0, 0, -1],
@@ -285,6 +297,35 @@ function clampPointToBounds(point, margin = getDieFootprint()) {
   ];
 }
 
+function getResponsiveDieHalf() {
+  const { shortSide, longSide, isPhone, isDesktop } = getViewportProfile();
+  const areaScale = Math.sqrt((W * H) / (390 * 844));
+  const aspectBias = clamp(longSide / Math.max(shortSide, 1), 1, 1.95);
+  const deviceBias = isPhone ? 0.9 : isDesktop ? 1.08 : 1;
+  const countBias = clamp(1 - Math.max(0, diceCount - 1) * 0.045, 0.72, 1);
+  return clamp(Math.round(22 * areaScale * deviceBias * (1 / Math.pow(aspectBias, 0.08)) * countBias), 18, 34);
+}
+
+function getResponsiveViewHeight() {
+  const { isPhone, isDesktop } = getViewportProfile();
+  const countBias = 1 + Math.max(0, diceCount - 1) * (isPhone ? 0.07 : 0.05);
+  const orientationBias = W > H ? 0.94 : 1.04;
+  const baseHeight = HALF * (isPhone ? 20.8 : isDesktop ? 17.2 : 18.6);
+  return clamp(baseHeight * countBias * orientationBias, 320, 760);
+}
+
+function clampExistingDiceToBounds() {
+  const margin = getDieFootprint();
+  dice.forEach((die) => {
+    die.syncScale();
+    const clamped = clampPointToBounds(die.pos, margin);
+    die.pos[0] = clamped[0];
+    die.pos[1] = clamped[1];
+    die.pos[2] = Math.max(die.pos[2], die.getRestingHeight());
+    die.syncVisual();
+  });
+}
+
 function screenToFloor(sx, sy) {
   ndc.x = (sx / W) * 2 - 1;
   ndc.y = -(sy / H) * 2 + 1;
@@ -296,7 +337,7 @@ function screenToFloor(sx, sy) {
 
 function updateCamera() {
   const aspect = W / H;
-  const viewHeight = clamp(HALF * 18, 360, 560);
+  const viewHeight = getResponsiveViewHeight();
   const halfViewHeight = viewHeight / 2;
   const halfViewWidth = halfViewHeight * aspect;
 
@@ -331,15 +372,16 @@ function updateWorldBounds() {
   let minY = Math.min(...samples.map((point) => point[1])) + margin;
   let maxY = Math.max(...samples.map((point) => point[1])) - margin;
 
-  if (maxX - minX < HALF * 10) {
+  const minSpan = HALF * (9 + diceCount * 1.15);
+  if (maxX - minX < minSpan) {
     const cx = (minX + maxX) * 0.5;
-    minX = cx - HALF * 5;
-    maxX = cx + HALF * 5;
+    minX = cx - minSpan * 0.5;
+    maxX = cx + minSpan * 0.5;
   }
-  if (maxY - minY < HALF * 10) {
+  if (maxY - minY < minSpan) {
     const cy = (minY + maxY) * 0.5;
-    minY = cy - HALF * 5;
-    maxY = cy + HALF * 5;
+    minY = cy - minSpan * 0.5;
+    maxY = cy + minSpan * 0.5;
   }
 
   WORLD_BOUNDS.minX = minX;
@@ -349,8 +391,9 @@ function updateWorldBounds() {
 }
 
 function updateFloorAndLights() {
-  const width = Math.max(HALF * 18, WORLD_BOUNDS.maxX - WORLD_BOUNDS.minX + HALF * 8);
-  const depth = Math.max(HALF * 18, WORLD_BOUNDS.maxY - WORLD_BOUNDS.minY + HALF * 8);
+  const floorSpan = HALF * (16 + diceCount * 2.1);
+  const width = Math.max(floorSpan, WORLD_BOUNDS.maxX - WORLD_BOUNDS.minX + HALF * 8);
+  const depth = Math.max(floorSpan, WORLD_BOUNDS.maxY - WORLD_BOUNDS.minY + HALF * 8);
   const cx = (WORLD_BOUNDS.minX + WORLD_BOUNDS.maxX) * 0.5;
   const cy = (WORLD_BOUNDS.minY + WORLD_BOUNDS.maxY) * 0.5;
   const span = Math.max(width, depth);
@@ -386,18 +429,18 @@ function recalcSceneMetrics() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(W, H, false);
 
-  HALF = clamp(Math.round(Math.min(W, H) * 0.052), 20, 30);
+  HALF = getResponsiveDieHalf();
   INERTIA = (2 / 3) * MASS * (HALF * 2) * (HALF * 2) / 6;
 
-  VIEW_PAD_X = clamp(W * 0.04, 22, 42);
-  VIEW_PAD_TOP = clamp(controlsRect.bottom - rect.top + 20, 78, Math.max(96, H * 0.18));
-  VIEW_PAD_BOTTOM = clamp(H * 0.05, 24, 40);
+  const { isPhone } = getViewportProfile();
+  VIEW_PAD_X = clamp(W * (isPhone ? 0.052 : 0.04), 20, 44);
+  VIEW_PAD_TOP = clamp(controlsRect.bottom - rect.top + (isPhone ? 24 : 20), 78, Math.max(isPhone ? 108 : 96, H * (isPhone ? 0.21 : 0.18)));
+  VIEW_PAD_BOTTOM = clamp(H * (isPhone ? 0.062 : 0.05), 24, 46);
 
   updateCamera();
   updateWorldBounds();
   updateFloorAndLights();
-
-  dice.forEach((die) => die.syncScale());
+  clampExistingDiceToBounds();
 }
 
 class Die {
@@ -791,6 +834,7 @@ function chg(delta) {
   cdis.textContent = `${next} 顆`;
   bm.disabled = next <= 1;
   bp.disabled = next >= 8;
+  recalcSceneMetrics();
   renderScene();
 }
 
